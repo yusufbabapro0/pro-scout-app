@@ -1,35 +1,81 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 from scipy.stats import poisson
+from sklearn.ensemble import RandomForestClassifier
 
 # ----------------------------
-# ÖRNEK VERİ
+# API AYARI
 # ----------------------------
-data = pd.DataFrame({
-    "home_team": ["Galatasaray", "Fenerbahce", "Besiktas", "Galatasaray", "Trabzonspor"],
-    "away_team": ["Fenerbahce", "Besiktas", "Galatasaray", "Trabzonspor", "Fenerbahce"],
-    "home_goals": [2, 3, 1, 2, 1],
-    "away_goals": [1, 2, 1, 0, 2]
-})
+API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
+
+headers = {"X-Auth-Token": API_KEY}
+
+# Premier League (örnek)
+url = "https://api.football-data.org/v4/competitions/PL/matches?status=FINISHED"
+
+@st.cache_data
+def load_data():
+    res = requests.get(url, headers=headers)
+    data = res.json()
+
+    matches = []
+
+    for m in data["matches"]:
+        if m["score"]["fullTime"]["home"] is not None:
+            matches.append({
+                "home_team": m["homeTeam"]["name"],
+                "away_team": m["awayTeam"]["name"],
+                "home_goals": m["score"]["fullTime"]["home"],
+                "away_goals": m["score"]["fullTime"]["away"]
+            })
+
+    return pd.DataFrame(matches)
+
+df = load_data()
 
 # ----------------------------
-# ELO RATING (elle başlatıyoruz)
+# ELO OLUŞTUR
 # ----------------------------
-elo = {
-    "Galatasaray": 1600,
-    "Fenerbahce": 1580,
-    "Besiktas": 1550,
-    "Trabzonspor": 1500
-}
+teams = pd.concat([df['home_team'], df['away_team']]).unique()
+
+elo = {team: 1500 for team in teams}
 
 # ----------------------------
-# MODEL
+# FEATURE ENGINEERING
 # ----------------------------
-def calculate_team_strengths(df):
+def create_features(df):
     df = df.copy()
 
-    # Weighted form (son maçlar daha önemli)
+    df["goal_diff"] = df["home_goals"] - df["away_goals"]
+    df["result"] = df["goal_diff"].apply(lambda x: 1 if x > 0 else (0 if x == 0 else -1))
+
+    df["elo_home"] = df["home_team"].map(elo)
+    df["elo_away"] = df["away_team"].map(elo)
+    df["elo_diff"] = df["elo_home"] - df["elo_away"]
+
+    df["total_goals"] = df["home_goals"] + df["away_goals"]
+
+    return df
+
+df_ml = create_features(df)
+
+# ----------------------------
+# ML MODEL
+# ----------------------------
+features = ["elo_diff", "total_goals"]
+X = df_ml[features]
+y = df_ml["result"]
+
+model = RandomForestClassifier(n_estimators=100)
+model.fit(X, y)
+
+# ----------------------------
+# POISSON
+# ----------------------------
+def calculate_strengths(df):
+    df = df.copy()
     df["weight"] = np.linspace(0.5, 1.5, len(df))
 
     teams = pd.concat([df['home_team'], df['away_team']]).unique()
@@ -53,47 +99,64 @@ def calculate_team_strengths(df):
 
     return attack, defense
 
+attack, defense = calculate_strengths(df)
 
-def predict_score(home_team, away_team, attack, defense, max_goals=5):
+# ----------------------------
+# TAHMİN
+# ----------------------------
+def predict(home_team, away_team):
 
-    home_lambda = attack[home_team] * defense[away_team]
+    home_lambda = attack[home_team] * defense[away_team] * 1.2
     away_lambda = attack[away_team] * defense[home_team]
 
-    # Ev sahibi avantajı
-    home_lambda *= 1.2
+    elo_diff = elo[home_team] - elo[away_team]
 
-    # Elo farkı etkisi
-    elo_diff = (elo[home_team] - elo[away_team]) / 400
-    home_lambda *= (1 + elo_diff)
-    away_lambda *= (1 - elo_diff)
+    ml_input = pd.DataFrame([[elo_diff, home_lambda + away_lambda]],
+                            columns=["elo_diff", "total_goals"])
+
+    result = model.predict(ml_input)[0]
 
     results = []
 
-    for i in range(max_goals + 1):
-        for j in range(max_goals + 1):
+    for i in range(6):
+        for j in range(6):
             prob = poisson.pmf(i, home_lambda) * poisson.pmf(j, away_lambda)
+
+            if result == 1 and i > j:
+                prob *= 1.2
+            elif result == -1 and i < j:
+                prob *= 1.2
+            elif result == 0 and i == j:
+                prob *= 1.2
+
             results.append((i, j, prob))
 
     results = sorted(results, key=lambda x: x[2], reverse=True)
-    return results
-
+    return results[:5], result
 
 # ----------------------------
-# STREAMLIT UI
+# UI
 # ----------------------------
-st.title("⚽ Gelişmiş Maç Tahmin AI")
+st.title("🔥 Gerçek Veri Maç Tahmin AI")
 
-attack, defense = calculate_team_strengths(data)
-
-teams = sorted(list(set(data['home_team'])))
+teams = sorted(list(set(df['home_team'])))
 
 home_team = st.selectbox("Ev Sahibi", teams)
 away_team = st.selectbox("Deplasman", teams)
 
 if st.button("Tahmin Et"):
-    predictions = predict_score(home_team, away_team, attack, defense)
 
-    st.subheader("📊 En Olası Skorlar")
+    scores, result = predict(home_team, away_team)
 
-    for home, away, prob in predictions[:5]:
-        st.write(f"{home}-{away} → %{round(prob*100,2)}")
+    st.subheader("📊 Skor Tahminleri")
+    for h, a, p in scores:
+        st.write(f"{h}-{a} → %{round(p*100,2)}")
+
+    st.subheader("🎯 Maç Sonucu")
+
+    if result == 1:
+        st.write("Ev Sahibi Kazanır")
+    elif result == -1:
+        st.write("Deplasman Kazanır")
+    else:
+        st.write("Beraberlik")apı
