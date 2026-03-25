@@ -10,7 +10,7 @@ from scipy.stats import poisson
 st.set_page_config(page_title="PRO SCOUT ELITE v3", layout="wide")
 
 ODDS_API_KEY = "YOUR_ODDS_API_KEY"
-OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+OPENAI_API_KEY = "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"
 
 # ============ DATA ============
 @st.cache_data
