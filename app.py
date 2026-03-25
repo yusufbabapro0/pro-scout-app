@@ -13,11 +13,10 @@ headers = {
 }
 
 # ----------------------------
-# MAÇ + ORAN ÇEK
+# MAÇ ÇEK
 # ----------------------------
 @st.cache_data(ttl=1800)
 def get_data():
-
     url = "https://v3.football.api-sports.io/fixtures?next=30"
     res = requests.get(url, headers=headers)
 
@@ -29,15 +28,16 @@ def get_data():
     matches = []
 
     for m in data:
-
-        odds = {"home":2.0,"draw":3.0,"away":3.0,"over":1.8,"btts":1.7}
-
-        # oran endpoint pahalı olduğu için fallback
         matches.append({
-            "league": m["league"]["name"],
             "home": m["teams"]["home"]["name"],
             "away": m["teams"]["away"]["name"],
-            "odds": odds
+            "odds": {
+                "home": 2.0,
+                "draw": 3.2,
+                "away": 3.5,
+                "over": 1.8,
+                "btts": 1.7
+            }
         })
 
     return pd.DataFrame(matches)
@@ -72,7 +72,7 @@ def predict(home, away):
 
     probs = sorted(probs, key=lambda x: x[2], reverse=True)
 
-    markets = {
+    return {
         "MS1": sum(p for i,j,p in probs if i>j),
         "MSX": sum(p for i,j,p in probs if i==j),
         "MS2": sum(p for i,j,p in probs if i<j),
@@ -80,10 +80,8 @@ def predict(home, away):
         "KG VAR": sum(p for i,j,p in probs if i>0 and j>0)
     }
 
-    return markets
-
 # ----------------------------
-# KUPON ENGINE (EN KRİTİK)
+# KUPON ENGINE (FIXED)
 # ----------------------------
 def build_coupon(df):
 
@@ -96,22 +94,12 @@ def build_coupon(df):
 
         for k, prob in markets.items():
 
-            if k == "MS1":
-                o = odds["home"]
-            elif k == "MSX":
-                o = odds["draw"]
-            elif k == "MS2":
-                o = odds["away"]
-            elif k == "ÜST 2.5":
-                o = odds["over"]
-            else:
-                o = odds["btts"]
+            o = odds["home"] if k=="MS1" else odds["draw"] if k=="MSX" else odds["away"] if k=="MS2" else odds["over"] if k=="ÜST 2.5" else odds["btts"]
 
             val = value(prob, o)
 
-            # 🔥 EN KRİTİK FİLTRE
-            if val > 0.15 and prob > 0.60:
-
+            # 🔧 YUMUŞATILDI
+            if val > 0.05 and prob > 0.55:
                 picks.append({
                     "match": f"{row['home']} vs {row['away']}",
                     "pick": k,
@@ -120,45 +108,47 @@ def build_coupon(df):
                     "value": val
                 })
 
-    # en iyi value sıralama
-    picks = sorted(picks, key=lambda x: x["value"], reverse=True)
+    # ❗ FALLBACK (en kritik fix)
+    if len(picks) < 3:
+        for _, row in df.iterrows():
+            markets = predict(row["home"], row["away"])
+            best = max(markets.items(), key=lambda x: x[1])
 
-    banko = [p for p in picks if p["prob"] > 0.70][:2]
-    orta = [p for p in picks if 0.60 < p["prob"] <= 0.70][:2]
-    risk = [p for p in picks if p["value"] > 0.25][:1]
+            picks.append({
+                "match": f"{row['home']} vs {row['away']}",
+                "pick": best[0],
+                "prob": best[1],
+                "odds": 1.8,
+                "value": 0
+            })
 
-    return banko, orta, risk
+    picks = sorted(picks, key=lambda x: x["prob"], reverse=True)
+
+    return picks[:5]
 
 # ----------------------------
 # UI
 # ----------------------------
-st.title("💀 ULTIMATE BETTING AI")
+st.title("💀 ULTIMATE BET AI (FIXED)")
 
 df = get_data()
 
 if df is None:
-    st.error("API limit dolmuş olabilir")
+    st.error("API çalışmıyor")
 else:
 
-    if st.button("🚀 GÜNLÜK KUPON ÜRET"):
+    if st.button("🚀 KUPON ÜRET"):
 
-        banko, orta, risk = build_coupon(df)
+        picks = build_coupon(df)
 
-        st.subheader("🔥 BANKO (En Güvenli)")
-        for b in banko:
-            st.success(f"{b['match']} → {b['pick']} | %{round(b['prob']*100,1)} | oran {b['odds']} | value {round(b['value'],2)}")
+        st.subheader("🔥 GÜNLÜK KUPON")
 
-        st.subheader("⚖️ ORTA RİSK")
-        for o in orta:
-            st.info(f"{o['match']} → {o['pick']} | %{round(o['prob']*100,1)} | oran {o['odds']}")
+        for p in picks:
+            pct = round(p["prob"]*100,1)
 
-        st.subheader("🎲 HIGH VALUE (Riskli)")
-        for r in risk:
-            st.warning(f"{r['match']} → {r['pick']} | value {round(r['value'],2)}")
-
-        st.subheader("💰 AKILLI KUPON")
-
-        combo = banko[:1] + orta[:1]
-
-        for c in combo:
-            st.write(f"{c['match']} → {c['pick']}")
+            if pct > 70:
+                st.success(f"{p['match']} → {p['pick']} (%{pct})")
+            elif pct > 60:
+                st.info(f"{p['match']} → {p['pick']} (%{pct})")
+            else:
+                st.warning(f"{p['match']} → {p['pick']} (%{pct})")
