@@ -13,53 +13,57 @@ headers = {
 }
 
 # ----------------------------
+# SESSION STATE
+# ----------------------------
+if "picks" not in st.session_state:
+    st.session_state.picks = []
+
+# ----------------------------
 # MAÇ ÇEK
 # ----------------------------
 @st.cache_data(ttl=1800)
 def get_data():
-    url = "https://v3.football.api-sports.io/fixtures?next=30"
-    res = requests.get(url, headers=headers)
+    try:
+        url = "https://v3.football.api-sports.io/fixtures?next=30"
+        res = requests.get(url, headers=headers)
 
-    if res.status_code != 200:
-        return None
+        if res.status_code != 200:
+            return pd.DataFrame()
 
-    data = res.json()["response"]
+        data = res.json()["response"]
 
-    matches = []
+        matches = []
 
-    for m in data:
-        matches.append({
-            "home": m["teams"]["home"]["name"],
-            "away": m["teams"]["away"]["name"],
-            "odds": {
-                "home": 2.0,
-                "draw": 3.2,
-                "away": 3.5,
-                "over": 1.8,
-                "btts": 1.7
-            }
-        })
+        for m in data:
+            matches.append({
+                "home": m["teams"]["home"]["name"],
+                "away": m["teams"]["away"]["name"]
+            })
 
-    return pd.DataFrame(matches)
+        return pd.DataFrame(matches)
+
+    except:
+        return pd.DataFrame()
 
 # ----------------------------
-# TAKIM GÜÇ
+# FALLBACK DATA (KRİTİK)
+# ----------------------------
+def fallback_data():
+    return pd.DataFrame([
+        {"home":"Galatasaray","away":"Besiktas"},
+        {"home":"Fenerbahce","away":"Trabzonspor"},
+        {"home":"Barcelona","away":"Sevilla"},
+        {"home":"Arsenal","away":"Chelsea"}
+    ])
+
+# ----------------------------
+# MODEL
 # ----------------------------
 def power(team):
     np.random.seed(abs(hash(team)) % 1000)
     return np.random.uniform(0.9, 1.8)
 
-# ----------------------------
-# VALUE
-# ----------------------------
-def value(prob, odds):
-    return prob * odds - 1
-
-# ----------------------------
-# TAHMİN
-# ----------------------------
 def predict(home, away):
-
     home_xg = power(home) * 1.3
     away_xg = power(away)
 
@@ -72,7 +76,7 @@ def predict(home, away):
 
     probs = sorted(probs, key=lambda x: x[2], reverse=True)
 
-    return {
+    markets = {
         "MS1": sum(p for i,j,p in probs if i>j),
         "MSX": sum(p for i,j,p in probs if i==j),
         "MS2": sum(p for i,j,p in probs if i<j),
@@ -80,47 +84,24 @@ def predict(home, away):
         "KG VAR": sum(p for i,j,p in probs if i>0 and j>0)
     }
 
+    return markets
+
 # ----------------------------
-# KUPON ENGINE (FIXED)
+# KUPON OLUŞTUR
 # ----------------------------
 def build_coupon(df):
 
     picks = []
 
     for _, row in df.iterrows():
-
         markets = predict(row["home"], row["away"])
-        odds = row["odds"]
+        best = max(markets.items(), key=lambda x: x[1])
 
-        for k, prob in markets.items():
-
-            o = odds["home"] if k=="MS1" else odds["draw"] if k=="MSX" else odds["away"] if k=="MS2" else odds["over"] if k=="ÜST 2.5" else odds["btts"]
-
-            val = value(prob, o)
-
-            # 🔧 YUMUŞATILDI
-            if val > 0.05 and prob > 0.55:
-                picks.append({
-                    "match": f"{row['home']} vs {row['away']}",
-                    "pick": k,
-                    "prob": prob,
-                    "odds": o,
-                    "value": val
-                })
-
-    # ❗ FALLBACK (en kritik fix)
-    if len(picks) < 3:
-        for _, row in df.iterrows():
-            markets = predict(row["home"], row["away"])
-            best = max(markets.items(), key=lambda x: x[1])
-
-            picks.append({
-                "match": f"{row['home']} vs {row['away']}",
-                "pick": best[0],
-                "prob": best[1],
-                "odds": 1.8,
-                "value": 0
-            })
+        picks.append({
+            "match": f"{row['home']} vs {row['away']}",
+            "pick": best[0],
+            "prob": best[1]
+        })
 
     picks = sorted(picks, key=lambda x: x["prob"], reverse=True)
 
@@ -129,26 +110,33 @@ def build_coupon(df):
 # ----------------------------
 # UI
 # ----------------------------
-st.title("💀 ULTIMATE BET AI (FIXED)")
+st.title("💀 ULTIMATE BET AI (FINAL FIX)")
 
 df = get_data()
 
-if df is None:
-    st.error("API çalışmıyor")
-else:
+# ❗ API boşsa fallback kullan
+if df.empty:
+    st.warning("API veri gelmedi → demo kupon gösteriliyor")
+    df = fallback_data()
 
-    if st.button("🚀 KUPON ÜRET"):
+if st.button("🚀 KUPON ÜRET"):
 
-        picks = build_coupon(df)
+    st.session_state.picks = build_coupon(df)
 
-        st.subheader("🔥 GÜNLÜK KUPON")
+# ----------------------------
+# SONUÇ GÖSTER
+# ----------------------------
+if st.session_state.picks:
 
-        for p in picks:
-            pct = round(p["prob"]*100,1)
+    st.subheader("🔥 GÜNLÜK KUPON")
 
-            if pct > 70:
-                st.success(f"{p['match']} → {p['pick']} (%{pct})")
-            elif pct > 60:
-                st.info(f"{p['match']} → {p['pick']} (%{pct})")
-            else:
-                st.warning(f"{p['match']} → {p['pick']} (%{pct})")
+    for p in st.session_state.picks:
+
+        pct = round(p["prob"] * 100, 1)
+
+        if pct > 70:
+            st.success(f"{p['match']} → {p['pick']} (%{pct})")
+        elif pct > 60:
+            st.info(f"{p['match']} → {p['pick']} (%{pct})")
+        else:
+            st.warning(f"{p['match']} → {p['pick']} (%{pct})")
