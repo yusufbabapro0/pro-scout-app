@@ -12,7 +12,6 @@ API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
 
 headers = {"X-Auth-Token": API_KEY}
 
-# Premier League (örnek)
 url = "https://api.football-data.org/v4/competitions/PL/matches?status=FINISHED"
 
 @st.cache_data
@@ -36,10 +35,9 @@ def load_data():
 df = load_data()
 
 # ----------------------------
-# ELO OLUŞTUR
+# ELO
 # ----------------------------
 teams = pd.concat([df['home_team'], df['away_team']]).unique()
-
 elo = {team: 1500 for team in teams}
 
 # ----------------------------
@@ -159,4 +157,4 @@ if st.button("Tahmin Et"):
     elif result == -1:
         st.write("Deplasman Kazanır")
     else:
-        st.write("Beraberlik")apı
+        st.write("Beraberlik")
