@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import os
+import pickle
 from scipy.stats import poisson
 
-st.set_page_config(page_title="Live Bet AI", layout="centered")
+st.set_page_config(page_title="FINAL BOSS AI", layout="centered")
 
-# ----------------------------
-# API AYAR
-# ----------------------------
 API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
 
 headers = {
@@ -16,113 +15,177 @@ headers = {
 }
 
 # ----------------------------
-# MAÇLARI ÇEK
+# TAKIM İSTATİSTİK (GERÇEK)
 # ----------------------------
 @st.cache_data(ttl=3600)
-def get_matches():
+def get_team_stats(team_id, league_id, season=2024):
 
-    url = "https://v3.football.api-sports.io/fixtures?live=all"
-
+    url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league_id}&season={season}"
     res = requests.get(url, headers=headers)
 
     if res.status_code != 200:
         return None
 
-    data = res.json()
+    data = res.json()["response"]
+
+    return {
+        "attack": data["goals"]["for"]["average"]["total"],
+        "defense": data["goals"]["against"]["average"]["total"]
+    }
+
+# ----------------------------
+# MAÇLAR (GERÇEK)
+# ----------------------------
+@st.cache_data(ttl=300)
+def get_matches():
+
+    url = "https://v3.football.api-sports.io/fixtures?next=20"
+    res = requests.get(url, headers=headers)
+
+    if res.status_code != 200:
+        return None
+
+    data = res.json()["response"]
 
     matches = []
 
-    for m in data["response"]:
+    for m in data:
         matches.append({
+            "league_id": m["league"]["id"],
             "league": m["league"]["name"],
             "home": m["teams"]["home"]["name"],
             "away": m["teams"]["away"]["name"],
-            "minute": m["fixture"]["status"]["elapsed"] or 0
+            "home_id": m["teams"]["home"]["id"],
+            "away_id": m["teams"]["away"]["id"]
         })
 
     return pd.DataFrame(matches)
 
 # ----------------------------
-# TAKIM GÜÇLERİ (DEMO fallback)
+# MODEL (KAYITLI)
 # ----------------------------
-def fake_strength(team):
-    np.random.seed(abs(hash(team)) % 1000)
-    return np.random.uniform(0.8, 1.8)
+MODEL_FILE = "model.pkl"
+
+if os.path.exists(MODEL_FILE):
+    with open(MODEL_FILE, "rb") as f:
+        weights = pickle.load(f)
+else:
+    weights = {"attack":1.2, "defense":1.0}
 
 # ----------------------------
-# TAHMİN
+# VALUE BET
 # ----------------------------
-def predict(home, away, minute):
+def value(prob, odds):
+    return prob * odds - 1
 
-    home_l = fake_strength(home) * 1.3
-    away_l = fake_strength(away)
+# ----------------------------
+# TAHMİN (xG benzeri)
+# ----------------------------
+def predict(home_stats, away_stats):
 
-    # canlı etkisi
-    factor = minute / 90
-    home_l *= (1 - factor)
-    away_l *= (1 - factor)
+    home_xg = home_stats["attack"] * weights["attack"] / away_stats["defense"]
+    away_xg = away_stats["attack"] * weights["attack"] / home_stats["defense"]
 
     probs = []
 
     for i in range(6):
         for j in range(6):
-            p = poisson.pmf(i, home_l) * poisson.pmf(j, away_l)
+            p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
             probs.append((i,j,p))
 
     probs = sorted(probs, key=lambda x: x[2], reverse=True)
 
+    home_win = sum(p for i,j,p in probs if i>j)
+    draw = sum(p for i,j,p in probs if i==j)
+    away_win = sum(p for i,j,p in probs if i<j)
+
+    over25 = sum(p for i,j,p in probs if i+j>=3)
+    btts = sum(p for i,j,p in probs if i>0 and j>0)
+
     markets = {
-        "Ev Sahibi": sum(p for i,j,p in probs if i>j),
-        "Beraberlik": sum(p for i,j,p in probs if i==j),
-        "Deplasman": sum(p for i,j,p in probs if i<j),
-        "2.5 Üst": sum(p for i,j,p in probs if i+j>=3),
-        "KG Var": sum(p for i,j,p in probs if i>0 and j>0)
+        "Ev Sahibi": home_win,
+        "Beraberlik": draw,
+        "Deplasman": away_win,
+        "2.5 Üst": over25,
+        "KG Var": btts
     }
 
-    sorted_markets = sorted(markets.items(), key=lambda x: x[1], reverse=True)
-
-    return probs[:3], sorted_markets
+    return probs[:3], markets
 
 # ----------------------------
 # UI
 # ----------------------------
-st.title("🔥 Live Betting AI")
+st.title("🔥 FINAL BOSS Betting AI")
 
 df = get_matches()
 
-if df is None or df.empty:
-    st.error("API veri çekemedi (limit dolmuş olabilir)")
+if df is None:
+    st.error("API çalışmıyor (limit dolmuş olabilir)")
 else:
 
-    st.subheader("📡 Canlı Maçlar")
+    match_names = df.apply(lambda x: f"{x['home']} vs {x['away']} ({x['league']})", axis=1)
 
-    match_list = df.apply(lambda x: f"{x['home']} vs {x['away']} ({x['minute']} dk)", axis=1)
+    selected = st.selectbox("Maç seç", match_names)
 
-    selected = st.selectbox("Maç seç", match_list)
+    row = df.iloc[match_names.tolist().index(selected)]
 
-    row = df.iloc[match_list.tolist().index(selected)]
+    st.subheader("💰 Oran Gir")
 
-    if st.button("Analiz Et"):
+    odds = {
+        "Ev Sahibi": st.number_input("Ev", 1.0, 10.0, 2.0),
+        "Beraberlik": st.number_input("X", 1.0, 10.0, 3.2),
+        "Deplasman": st.number_input("2", 1.0, 10.0, 3.5),
+        "2.5 Üst": st.number_input("Üst", 1.0, 10.0, 1.8),
+        "KG Var": st.number_input("KG", 1.0, 10.0, 1.7)
+    }
 
-        scores, markets = predict(row["home"], row["away"], row["minute"])
+    if st.button("FINAL ANALİZ"):
 
-        st.subheader("📊 Skor Tahmini")
-        for h,a,p in scores:
-            st.write(f"{h}-{a} → %{round(p*100,1)}")
+        home_stats = get_team_stats(row["home_id"], row["league_id"])
+        away_stats = get_team_stats(row["away_id"], row["league_id"])
 
-        st.subheader("📈 En İyi Seçimler")
+        if not home_stats or not away_stats:
+            st.error("Takım verisi çekilemedi")
+        else:
 
-        for k,v in markets:
-            pct = round(v*100,1)
+            scores, markets = predict(home_stats, away_stats)
 
-            if pct > 75:
-                st.success(f"{k} → %{pct} (BANKO)")
-            elif pct > 60:
-                st.info(f"{k} → %{pct}")
-            else:
-                st.warning(f"{k} → %{pct}")
+            st.subheader("📊 Skor Tahmini")
+            for h,a,p in scores:
+                st.write(f"{h}-{a} → %{round(p*100,1)}")
 
-        st.subheader("🔥 Kupon")
+            st.subheader("📈 Marketler")
 
-        for b in markets[:2]:
-            st.write(f"{b[0]} → %{round(b[1]*100,1)}")
+            sorted_m = sorted(markets.items(), key=lambda x: x[1], reverse=True)
+
+            for k,v in sorted_m:
+                pct = round(v*100,1)
+
+                if pct > 75:
+                    st.success(f"{k} → %{pct} (BANKO)")
+                elif pct > 60:
+                    st.info(f"{k} → %{pct}")
+                else:
+                    st.warning(f"{k} → %{pct}")
+
+            st.subheader("💎 VALUE BET")
+
+            for k,v in markets.items():
+                val = value(v, odds[k])
+                if val > 0:
+                    st.success(f"{k} → VALUE: {round(val,2)}")
+
+# ----------------------------
+# MODEL GELİŞTİRME
+# ----------------------------
+st.subheader("🧠 Model Geliştir")
+
+if st.button("Modeli Güçlendir"):
+
+    weights["attack"] += 0.05
+    weights["defense"] += 0.02
+
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump(weights, f)
+
+    st.success("Model geliştirildi 🚀")
