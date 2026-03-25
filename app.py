@@ -4,7 +4,7 @@ import numpy as np
 from scipy.stats import poisson
 
 # ----------------------------
-# ÖRNEK VERİ (gömülü)
+# ÖRNEK VERİ
 # ----------------------------
 data = pd.DataFrame({
     "home_team": ["Galatasaray", "Fenerbahce", "Besiktas", "Galatasaray", "Trabzonspor"],
@@ -14,9 +14,24 @@ data = pd.DataFrame({
 })
 
 # ----------------------------
+# ELO RATING (elle başlatıyoruz)
+# ----------------------------
+elo = {
+    "Galatasaray": 1600,
+    "Fenerbahce": 1580,
+    "Besiktas": 1550,
+    "Trabzonspor": 1500
+}
+
+# ----------------------------
 # MODEL
 # ----------------------------
 def calculate_team_strengths(df):
+    df = df.copy()
+
+    # Weighted form (son maçlar daha önemli)
+    df["weight"] = np.linspace(0.5, 1.5, len(df))
+
     teams = pd.concat([df['home_team'], df['away_team']]).unique()
 
     attack = {}
@@ -27,19 +42,30 @@ def calculate_team_strengths(df):
         away_games = df[df['away_team'] == team]
 
         attack[team] = (
-            home_games['home_goals'].mean() + away_games['away_goals'].mean()
+            (home_games['home_goals'] * home_games['weight']).mean() +
+            (away_games['away_goals'] * away_games['weight']).mean()
         ) / 2
 
         defense[team] = (
-            home_games['away_goals'].mean() + away_games['home_goals'].mean()
+            (home_games['away_goals'] * home_games['weight']).mean() +
+            (away_games['home_goals'] * away_games['weight']).mean()
         ) / 2
 
     return attack, defense
 
 
 def predict_score(home_team, away_team, attack, defense, max_goals=5):
+
     home_lambda = attack[home_team] * defense[away_team]
     away_lambda = attack[away_team] * defense[home_team]
+
+    # Ev sahibi avantajı
+    home_lambda *= 1.2
+
+    # Elo farkı etkisi
+    elo_diff = (elo[home_team] - elo[away_team]) / 400
+    home_lambda *= (1 + elo_diff)
+    away_lambda *= (1 - elo_diff)
 
     results = []
 
@@ -55,7 +81,7 @@ def predict_score(home_team, away_team, attack, defense, max_goals=5):
 # ----------------------------
 # STREAMLIT UI
 # ----------------------------
-st.title("⚽ Maç Skor Tahmin AI")
+st.title("⚽ Gelişmiş Maç Tahmin AI")
 
 attack, defense = calculate_team_strengths(data)
 
