@@ -1,175 +1,152 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.preprocessing import LabelEncoder
+import requests
+import os
+import pickle
+from sklearn.ensemble import RandomForestClassifier
 
-st.set_page_config(page_title="ELITE BET AI", layout="centered")
+st.set_page_config(page_title="Learning AI", layout="centered")
 
-# ----------------------------
-# DATA
-# ----------------------------
-@st.cache_data
-def load_data():
-    return pd.read_csv("matches.csv")
+API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
 
-df = load_data()
+headers = {
+    "x-apisports-key": API_KEY
+}
 
-# ----------------------------
-# FEATURE ENGINEERING (ELITE)
-# ----------------------------
-def create_features(df):
-
-    # takım encoding
-    le = LabelEncoder()
-    df["home_enc"] = le.fit_transform(df["home_team"])
-    df["away_enc"] = le.fit_transform(df["away_team"])
-
-    # gol feature
-    df["goal_diff"] = df["home_goals"] - df["away_goals"]
-    df["total_goals"] = df["home_goals"] + df["away_goals"]
-
-    # rolling form (son 5 maç)
-    df["form_home"] = df.groupby("home_team")["goal_diff"].rolling(5).mean().reset_index(0,drop=True)
-    df["form_away"] = df.groupby("away_team")["goal_diff"].rolling(5).mean().reset_index(0,drop=True)
-
-    df.fillna(0, inplace=True)
-
-    # hedef
-    df["result"] = df["goal_diff"].apply(lambda x: 1 if x>0 else (0 if x==0 else -1))
-
-    return df
-
-df = create_features(df)
+DATA_FILE = "training_data.csv"
+MODEL_FILE = "ml_model.pkl"
 
 # ----------------------------
-# MODEL
+# MAÇLARI ÇEK
 # ----------------------------
-features = ["home_enc","away_enc","form_home","form_away","total_goals"]
+@st.cache_data(ttl=1800)
+def get_matches():
+    url = "https://v3.football.api-sports.io/fixtures?next=20"
+    res = requests.get(url, headers=headers)
 
-X = df[features]
-y = df["result"]
+    if res.status_code != 200:
+        return None
 
-X_train, X_test, y_train, y_test = train_test_split(X,y,test_size=0.2)
+    data = res.json()["response"]
 
-model = XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.05)
-model.fit(X_train, y_train)
+    matches = []
 
-preds = model.predict(X_test)
-acc = accuracy_score(y_test, preds)
+    for m in data:
+        matches.append({
+            "home": m["teams"]["home"]["name"],
+            "away": m["teams"]["away"]["name"]
+        })
 
-st.write(f"Accuracy: %{round(acc*100,2)}")
-
-# ----------------------------
-# PROBABILITY
-# ----------------------------
-probs = model.predict_proba(X_test)
-
-# ----------------------------
-# VALUE BET
-# ----------------------------
-def value(p, o):
-    return p * o - 1
+    return pd.DataFrame(matches)
 
 # ----------------------------
-# BACKTEST (ELITE)
+# FEATURE (ÖZELLİK)
 # ----------------------------
-def backtest(df):
+def team_power(team):
+    np.random.seed(abs(hash(team)) % 1000)
+    return np.random.uniform(0.8, 1.8)
 
-    profit = 0
-    bets = 0
-    wins = 0
-
-    for i,row in df.iterrows():
-
-        p = 0.55  # (gerçekte modelden alınmalı)
-        o = row["odds_home"]
-
-        ev = value(p,o)
-
-        if ev > 0:
-
-            bets += 1
-
-            if row["home_goals"] > row["away_goals"]:
-                profit += o - 1
-                wins += 1
-            else:
-                profit -= 1
-
-    roi = profit / bets if bets else 0
-    hit = wins / bets if bets else 0
-
-    return roi, bets, hit
-
-roi, bets, hit = backtest(df)
-
-st.subheader("📊 Backtest")
-st.write(f"Bet: {bets}")
-st.write(f"ROI: %{round(roi*100,2)}")
-st.write(f"Win Rate: %{round(hit*100,2)}")
+def create_features(home, away):
+    return [
+        team_power(home),
+        team_power(away),
+        team_power(home) - team_power(away)
+    ]
 
 # ----------------------------
-# TAHMİN PANELİ
+# MODEL YÜKLE / TRAIN
 # ----------------------------
-st.subheader("🎯 Yeni Maç")
+def load_model():
 
-home = st.text_input("Ev Takım")
-away = st.text_input("Deplasman")
+    if os.path.exists(MODEL_FILE):
+        return pickle.load(open(MODEL_FILE, "rb"))
 
-home_odds = st.number_input("Ev Oran",1.0,10.0,2.0)
-draw_odds = st.number_input("X",1.0,10.0,3.0)
-away_odds = st.number_input("Dep Oran",1.0,10.0,3.5)
+    else:
+        model = RandomForestClassifier(n_estimators=100)
+        return model
 
-if st.button("Analiz"):
+def train_model():
 
-    # basit encoding fallback
-    home_enc = hash(home)%1000
-    away_enc = hash(away)%1000
+    if not os.path.exists(DATA_FILE):
+        return None
 
-    sample = pd.DataFrame([[home_enc,away_enc,0,0,2]],
-        columns=features)
+    df = pd.read_csv(DATA_FILE)
 
-    prob = model.predict_proba(sample)[0]
+    X = df[["f1","f2","f3"]]
+    y = df["result"]
 
-    markets = {
-        "MS1": (prob[2], home_odds),
-        "MSX": (prob[1], draw_odds),
-        "MS2": (prob[0], away_odds)
+    model = RandomForestClassifier(n_estimators=200)
+    model.fit(X, y)
+
+    pickle.dump(model, open(MODEL_FILE, "wb"))
+
+    return model
+
+model = load_model()
+
+# ----------------------------
+# TAHMİN
+# ----------------------------
+def predict(home, away):
+
+    X = np.array(create_features(home, away)).reshape(1,-1)
+
+    probs = model.predict_proba(X)[0]
+
+    return {
+        "MS1": probs[0],
+        "MSX": probs[1],
+        "MS2": probs[2]
     }
 
-    st.subheader("💎 VALUE")
+# ----------------------------
+# UI
+# ----------------------------
+st.title("🧠 Learning Betting AI")
 
-    for k,(p,o) in markets.items():
-        ev = value(p,o)
+df = get_matches()
 
-        if ev > 0:
-            st.success(f"{k} → EV {round(ev,2)} | %{round(p*100,1)}")
-        else:
-            st.write(f"{k} → oynanmaz")
+if df is None:
+    st.error("API veri çekemedi")
+else:
+
+    match_names = df.apply(lambda x: f"{x['home']} vs {x['away']}", axis=1)
+    selected = st.selectbox("Maç seç", match_names)
+
+    row = df.iloc[match_names.tolist().index(selected)]
+
+    if st.button("Tahmin Et"):
+
+        preds = predict(row["home"], row["away"])
+
+        for k,v in preds.items():
+            st.write(f"{k} → %{round(v*100,1)}")
 
 # ----------------------------
-# AUTO PICK (ELITE)
+# SONUÇ GİR (ÖĞRENME)
 # ----------------------------
-st.subheader("🤖 Günlük Seçim")
+st.subheader("📊 Sonuç Gir (AI Öğrenir)")
 
-if st.button("Seç"):
+result = st.selectbox("Sonuç", ["MS1","MSX","MS2"])
 
-    picks = []
+if st.button("Kaydet & Öğret"):
 
-    for i,row in df.sample(50).iterrows():
+    features = create_features(row["home"], row["away"])
 
-        p = 0.55
-        o = row["odds_home"]
-        ev = value(p,o)
+    new = pd.DataFrame([{
+        "f1": features[0],
+        "f2": features[1],
+        "f3": features[2],
+        "result": result
+    }])
 
-        if ev > 0.15:
+    if os.path.exists(DATA_FILE):
+        old = pd.read_csv(DATA_FILE)
+        new = pd.concat([old, new])
 
-            picks.append((row["home_team"], ev))
+    new.to_csv(DATA_FILE, index=False)
 
-    picks = sorted(picks, key=lambda x:x[1], reverse=True)[:3]
+    train_model()
 
-    for p in picks:
-        st.write(f"{p[0]} → EV {round(p[1],2)}")
+    st.success("AI kendini geliştirdi 🚀")
