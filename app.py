@@ -2,79 +2,80 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.stats import poisson
+import os
+import pickle
 
-st.set_page_config(page_title="Legend Bet AI", layout="centered")
+st.set_page_config(page_title="Bet AI Pro", layout="centered")
 
 # ----------------------------
-# DEMO / CSV
+# LOGIN (BASİT PANEL)
 # ----------------------------
-uploaded_file = st.file_uploader("CSV yükle", type=["csv"])
+USERS = {"admin":"1234", "user":"1111"}
+
+if "login" not in st.session_state:
+    st.session_state.login = False
+
+if not st.session_state.login:
+    st.title("🔐 Giriş")
+
+    u = st.text_input("Kullanıcı")
+    p = st.text_input("Şifre", type="password")
+
+    if st.button("Giriş"):
+        if u in USERS and USERS[u] == p:
+            st.session_state.login = True
+            st.success("Giriş başarılı")
+        else:
+            st.error("Hatalı giriş")
+
+    st.stop()
+
+# ----------------------------
+# VERİ YÜKLE
+# ----------------------------
+DATA_FILE = "data.csv"
 
 def load_data():
-    if uploaded_file:
-        return pd.read_csv(uploaded_file)
+    if os.path.exists(DATA_FILE):
+        return pd.read_csv(DATA_FILE)
     else:
-        leagues = ["Super Lig","Premier League","La Liga"]
+        leagues = ["Super Lig","Premier League"]
 
         teams = {
             "Super Lig": ["Galatasaray","Fenerbahce","Besiktas","Trabzonspor"],
-            "Premier League": ["Man City","Liverpool","Arsenal","Chelsea"],
-            "La Liga": ["Real Madrid","Barcelona","Atletico","Sevilla"]
+            "Premier League": ["Man City","Liverpool","Arsenal","Chelsea"]
         }
 
-        np.random.seed(42)
         rows = []
-
         for league in leagues:
             for _ in range(500):
                 home = np.random.choice(teams[league])
                 away = np.random.choice([t for t in teams[league] if t != home])
 
                 rows.append([
-                    league,
-                    home,
-                    away,
-                    np.random.poisson(1.6),
+                    league, home, away,
+                    np.random.poisson(1.5),
                     np.random.poisson(1.2)
                 ])
 
-        return pd.DataFrame(rows, columns=[
+        df = pd.DataFrame(rows, columns=[
             "league","home_team","away_team","home_goals","away_goals"
         ])
+        df.to_csv(DATA_FILE, index=False)
+        return df
 
 df = load_data()
 
 # ----------------------------
-# LİG
+# MODEL YÜKLE / TRAIN
 # ----------------------------
-league = st.selectbox("Lig", df["league"].unique())
-df = df[df["league"] == league]
+MODEL_FILE = "model.pkl"
 
-teams = pd.concat([df['home_team'], df['away_team']]).unique()
-
-# ----------------------------
-# FORM
-# ----------------------------
-def get_form(team):
-    matches = df[(df["home_team"] == team) | (df["away_team"] == team)].tail(5)
-
-    pts = 0
-    for _, r in matches.iterrows():
-        if r["home_team"] == team:
-            if r["home_goals"] > r["away_goals"]: pts += 3
-            elif r["home_goals"] == r["away_goals"]: pts += 1
-        else:
-            if r["away_goals"] > r["home_goals"]: pts += 3
-            elif r["away_goals"] == r["home_goals"]: pts += 1
-
-    return pts / 15
-
-# ----------------------------
-# GÜÇ
-# ----------------------------
-def strengths(df):
+def train_model(df):
     attack = {}
     defense = {}
+
+    teams = pd.concat([df['home_team'], df['away_team']]).unique()
 
     for t in teams:
         h = df[df["home_team"] == t]
@@ -85,24 +86,43 @@ def strengths(df):
 
     return attack, defense
 
-attack, defense = strengths(df)
+if os.path.exists(MODEL_FILE):
+    with open(MODEL_FILE, "rb") as f:
+        attack, defense = pickle.load(f)
+else:
+    attack, defense = train_model(df)
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump((attack, defense), f)
 
 # ----------------------------
-# VALUE BET
+# GÜNLÜK MAÇ (MANUEL + AUTO)
 # ----------------------------
-def value(prob, odds):
-    return prob * odds - 1
+st.title("🔥 Bet AI Pro")
+
+st.subheader("📅 Günlük Maç Ekle")
+
+league = st.selectbox("Lig", df["league"].unique())
+teams = pd.concat([df['home_team'], df['away_team']]).unique()
+
+home = st.selectbox("Ev Sahibi", teams)
+away = st.selectbox("Deplasman", teams)
+
+if st.button("Maçı Kaydet"):
+    new = pd.DataFrame([[league,home,away,0,0]],
+        columns=["league","home_team","away_team","home_goals","away_goals"])
+    df = pd.concat([df,new])
+    df.to_csv(DATA_FILE, index=False)
+    st.success("Maç eklendi")
 
 # ----------------------------
 # TAHMİN
 # ----------------------------
-def predict(home, away, odds):
+def predict(home, away):
 
-    home_l = attack[home] * defense[away] * 1.2
-    away_l = attack[away] * defense[home]
+    home_l = attack.get(home,1.2) * defense.get(away,1.2)
+    away_l = attack.get(away,1.2) * defense.get(home,1.2)
 
     probs = []
-
     for i in range(6):
         for j in range(6):
             p = poisson.pmf(i, home_l) * poisson.pmf(j, away_l)
@@ -110,7 +130,6 @@ def predict(home, away, odds):
 
     probs = sorted(probs, key=lambda x: x[2], reverse=True)
 
-    # temel
     home_win = sum(p for i,j,p in probs if i>j)
     draw = sum(p for i,j,p in probs if i==j)
     away_win = sum(p for i,j,p in probs if i<j)
@@ -126,52 +145,56 @@ def predict(home, away, odds):
         "KG Var": btts
     }
 
-    # VALUE hesap
-    values = {}
-    for k in markets:
-        values[k] = value(markets[k], odds[k])
-
-    # EN İYİLER
-    best = sorted(markets.items(), key=lambda x: x[1], reverse=True)
-    value_best = sorted(values.items(), key=lambda x: x[1], reverse=True)
-
-    return probs[:3], best, value_best
+    return sorted(probs, key=lambda x: x[2], reverse=True)[:3], markets
 
 # ----------------------------
-# UI
+# ANALİZ
 # ----------------------------
-st.title("🔥 LEGEND Betting AI")
+st.subheader("📊 Maç Analizi")
 
-home = st.selectbox("Ev Sahibi", teams)
-away = st.selectbox("Deplasman", teams)
+if st.button("Tahmin Et"):
 
-st.subheader("💰 Oran Gir")
+    scores, markets = predict(home, away)
 
-odds = {
-    "Ev Sahibi": st.number_input("Ev Sahibi", 1.0, 10.0, 2.0),
-    "Beraberlik": st.number_input("Beraberlik", 1.0, 10.0, 3.2),
-    "Deplasman": st.number_input("Deplasman", 1.0, 10.0, 3.5),
-    "2.5 Üst": st.number_input("2.5 Üst", 1.0, 10.0, 1.8),
-    "KG Var": st.number_input("KG Var", 1.0, 10.0, 1.7)
-}
-
-if st.button("Analiz"):
-
-    scores, best, value_best = predict(home, away, odds)
-
-    st.subheader("📊 Skor")
+    st.write("### Skor")
     for h,a,p in scores:
         st.write(f"{h}-{a} → %{round(p*100,1)}")
 
-    st.subheader("📈 En Güvenli")
-    for b in best[:3]:
-        st.write(f"{b[0]} → %{round(b[1]*100,1)}")
+    st.write("### Marketler")
 
-    st.subheader("💎 Value Bet (PARA BURADA)")
-    for v in value_best[:3]:
-        st.success(f"{v[0]} → Değer: {round(v[1],2)}")
+    sorted_m = sorted(markets.items(), key=lambda x: x[1], reverse=True)
 
-    st.subheader("🔥 Kupon Önerisi")
-    combo = [best[0][0], value_best[0][0]]
-    for c in combo:
-        st.write(c)
+    for k,v in sorted_m:
+        if v > 0.7:
+            st.success(f"{k} → %{round(v*100,1)}")
+        else:
+            st.write(f"{k} → %{round(v*100,1)}")
+
+    st.write("### 🎯 Kupon")
+
+    best2 = sorted_m[:2]
+    for b in best2:
+        st.write(b[0])
+
+# ----------------------------
+# MODEL GÜNCELLEME
+# ----------------------------
+st.subheader("🧠 Sonuç Gir (AI öğrenir)")
+
+hg = st.number_input("Ev Gol", 0, 10)
+ag = st.number_input("Dep Gol", 0, 10)
+
+if st.button("Sonucu Kaydet & Model Güncelle"):
+
+    new = pd.DataFrame([[league,home,away,hg,ag]],
+        columns=["league","home_team","away_team","home_goals","away_goals"])
+
+    df = pd.concat([df,new])
+    df.to_csv(DATA_FILE, index=False)
+
+    attack, defense = train_model(df)
+
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump((attack, defense), f)
+
+    st.success("Model güncellendi 🚀")
