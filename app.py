@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import poisson
@@ -53,10 +52,13 @@ def simulate(gh, ga):
     dr = np.sum(np.diag(matrix))*100
     aw = np.sum(np.triu(matrix, 1))*100
 
+    o15 = sum(matrix[i,j] for i in range(6) for j in range(6) if i+j>1.5)*100
     o25 = sum(matrix[i,j] for i in range(6) for j in range(6) if i+j>2.5)*100
+    o35 = sum(matrix[i,j] for i in range(6) for j in range(6) if i+j>3.5)*100
+
     btts = (1 - poisson.pmf(0, gh))*(1 - poisson.pmf(0, ga))*100
 
-    return hw, dr, aw, o25, btts
+    return hw, dr, aw, o15, o25, o35, btts
 
 def predict(home, away, m1, m2, le):
     try:
@@ -74,29 +76,18 @@ def predict(home, away, m1, m2, le):
 def value(prob, odd):
     return (prob/100)*odd
 
-# ============ AI (SAFE) ============
-def ai_comment(home, away, hw, dr, aw):
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        if not os.getenv("OPENAI_API_KEY"):
-            return "API key yok"
-
-        prompt = f"{home}-{away} için kısa bahis yorumu. Ev:{hw:.1f} X:{dr:.1f} Dep:{aw:.1f}"
-
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}]
-        )
-
-        return res.choices[0].message.content
-
-    except Exception as e:
-        return f"AI hata: {e}"
+# ============ RISK ============
+def risk_score(hw, dr, aw):
+    mx = max(hw, dr, aw)
+    if mx > 65:
+        return "🟢 Düşük Risk"
+    elif mx > 50:
+        return "🟡 Orta Risk"
+    else:
+        return "🔴 Yüksek Risk"
 
 # ============ UI ============
-st.title("💎 PRO SCOUT ULTIMATE (STABLE)")
+st.title("💎 PRO SCOUT ULTIMATE v5 (STABLE)")
 
 df = load_data()
 m1, m2, le = train(df)
@@ -113,7 +104,7 @@ o1 = c1.number_input("MS1", value=2.0)
 ox = c2.number_input("X", value=3.0)
 o2 = c3.number_input("MS2", value=3.0)
 
-if st.button("ANALİZ ET"):
+if st.button("🔥 ANALİZ ET"):
 
     if home == away:
         st.error("Aynı takım seçilemez")
@@ -123,28 +114,37 @@ if st.button("ANALİZ ET"):
         if not res:
             st.error("Takım bulunamadı")
         else:
-            (hw, dr, aw, o25, btts), gh, ga = res
+            (hw, dr, aw, o15, o25, o35, btts), gh, ga = res
 
-            st.subheader("📊 SONUÇ")
+            st.subheader("📊 MAÇ SONUCU")
             st.write(f"MS1: %{hw:.1f} | X: %{dr:.1f} | MS2: %{aw:.1f}")
-            st.write(f"ÜST2.5: %{o25:.1f} | KG: %{btts:.1f}")
+
+            st.subheader("⚽ GOL MARKETLERİ")
+            st.write(f"ÜST1.5: %{o15:.1f}")
+            st.write(f"ÜST2.5: %{o25:.1f}")
+            st.write(f"ÜST3.5: %{o35:.1f}")
+            st.write(f"KG VAR: %{btts:.1f}")
+
+            st.subheader("🎯 TAHMİN")
             st.success(f"Skor: {round(gh)}-{round(ga)}")
 
             # VALUE
-            st.subheader("💰 VALUE")
+            st.subheader("💰 VALUE ANALİZİ")
             v1 = value(hw, o1)
             vx = value(dr, ox)
             v2 = value(aw, o2)
 
-            st.write(f"MS1: {v1:.2f} | X: {vx:.2f} | MS2: {v2:.2f}")
+            st.write(f"MS1: {v1:.2f}")
+            st.write(f"X: {vx:.2f}")
+            st.write(f"MS2: {v2:.2f}")
 
             best = max([("MS1",v1),("X",vx),("MS2",v2)], key=lambda x:x[1])
 
             if best[1] > 1.05:
-                st.success(f"🔥 VALUE: {best[0]}")
+                st.success(f"🔥 VALUE BET: {best[0]}")
             else:
-                st.warning("Value yok")
+                st.warning("Value bet yok")
 
-            # AI
-            st.subheader("🤖 AI YORUM")
-            st.info(ai_comment(home, away, hw, dr, aw))
+            # RISK
+            st.subheader("⚠️ RİSK DURUMU")
+            st.write(risk_score(hw, dr, aw))
