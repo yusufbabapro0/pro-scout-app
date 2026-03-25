@@ -1,159 +1,164 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
+import requests
+from scipy.stats import poisson
 
-st.set_page_config(page_title="PRO BET AI", layout="centered")
+st.set_page_config(page_title="ULTIMATE BET AI", layout="centered")
+
+API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
+
+headers = {
+    "x-apisports-key": API_KEY
+}
 
 # ----------------------------
-# DATA
+# MAÇ + ORAN ÇEK
 # ----------------------------
-@st.cache_data
-def load_data():
-    try:
-        df = pd.read_csv("matches.csv")
-    except:
-        df = pd.DataFrame({
-            "home_team":[f"T{i}" for i in range(50)],
-            "away_team":[f"A{i}" for i in range(50)],
-            "home_goals":np.random.randint(0,4,50),
-            "away_goals":np.random.randint(0,4,50),
-            "odds_home":np.random.uniform(1.5,3.0,50),
-            "odds_draw":np.random.uniform(2.5,4.0,50),
-            "odds_away":np.random.uniform(2.0,5.0,50)
+@st.cache_data(ttl=1800)
+def get_data():
+
+    url = "https://v3.football.api-sports.io/fixtures?next=30"
+    res = requests.get(url, headers=headers)
+
+    if res.status_code != 200:
+        return None
+
+    data = res.json()["response"]
+
+    matches = []
+
+    for m in data:
+
+        odds = {"home":2.0,"draw":3.0,"away":3.0,"over":1.8,"btts":1.7}
+
+        # oran endpoint pahalı olduğu için fallback
+        matches.append({
+            "league": m["league"]["name"],
+            "home": m["teams"]["home"]["name"],
+            "away": m["teams"]["away"]["name"],
+            "odds": odds
         })
-    return df
 
-df = load_data()
-
-# ----------------------------
-# MATCH COLUMN (KRİTİK)
-# ----------------------------
-df["match"] = df["home_team"] + " vs " + df["away_team"]
+    return pd.DataFrame(matches)
 
 # ----------------------------
-# ENCODING
+# TAKIM GÜÇ
 # ----------------------------
-le = LabelEncoder()
-teams = pd.concat([df["home_team"], df["away_team"]])
-le.fit(teams)
-
-df["home_enc"] = le.transform(df["home_team"])
-df["away_enc"] = le.transform(df["away_team"])
+def power(team):
+    np.random.seed(abs(hash(team)) % 1000)
+    return np.random.uniform(0.9, 1.8)
 
 # ----------------------------
-# FEATURES
+# VALUE
 # ----------------------------
-df["goal_diff"] = df["home_goals"] - df["away_goals"]
-df["total_goals"] = df["home_goals"] + df["away_goals"]
-
-df["result"] = df["goal_diff"].apply(lambda x: 1 if x>0 else (0 if x==0 else -1))
-
-features = ["home_enc","away_enc","goal_diff","total_goals"]
-
-# ----------------------------
-# MODEL
-# ----------------------------
-X = df[features]
-y = df["result"]
-
-model = RandomForestClassifier(n_estimators=150)
-model.fit(X,y)
-
-# ----------------------------
-# VALUE FUNCTION
-# ----------------------------
-def value(p,o):
-    return p*o - 1
-
-# ----------------------------
-# UI
-# ----------------------------
-st.title("💀 PRO BET AI (TEMİZ)")
-
-selected = st.selectbox("Maç Seç", df["match"])
-
-# 🔒 SAFE ROW GET (BUG YOK)
-row_df = df[df["match"] == selected]
-
-if row_df.empty:
-    st.error("Maç bulunamadı")
-    st.stop()
-
-row = row_df.iloc[0]
-
-st.write(f"Seçilen: {row['home_team']} vs {row['away_team']}")
-
-# ----------------------------
-# ORANLAR
-# ----------------------------
-home_odds = st.number_input("MS1",1.0,10.0,float(row["odds_home"]))
-draw_odds = st.number_input("MSX",1.0,10.0,float(row["odds_draw"]))
-away_odds = st.number_input("MS2",1.0,10.0,float(row["odds_away"]))
+def value(prob, odds):
+    return prob * odds - 1
 
 # ----------------------------
 # TAHMİN
 # ----------------------------
-if st.button("Analiz Et"):
+def predict(home, away):
 
-    sample = pd.DataFrame([[
-        row["home_enc"],
-        row["away_enc"],
-        row["goal_diff"],
-        row["total_goals"]
-    ]], columns=features)
+    home_xg = power(home) * 1.3
+    away_xg = power(away)
 
-    probs = model.predict_proba(sample)[0]
+    probs = []
 
-    p_home = probs[2]
-    p_draw = probs[1]
-    p_away = probs[0]
+    for i in range(6):
+        for j in range(6):
+            p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
+            probs.append((i,j,p))
 
-    st.subheader("📊 Olasılık")
+    probs = sorted(probs, key=lambda x: x[2], reverse=True)
 
-    st.write(f"Ev: %{round(p_home*100,1)}")
-    st.write(f"Beraberlik: %{round(p_draw*100,1)}")
-    st.write(f"Dep: %{round(p_away*100,1)}")
+    markets = {
+        "MS1": sum(p for i,j,p in probs if i>j),
+        "MSX": sum(p for i,j,p in probs if i==j),
+        "MS2": sum(p for i,j,p in probs if i<j),
+        "ÜST 2.5": sum(p for i,j,p in probs if i+j>=3),
+        "KG VAR": sum(p for i,j,p in probs if i>0 and j>0)
+    }
 
-    st.subheader("💎 Value Bet")
-
-    if value(p_home, home_odds) > 0:
-        st.success("MS1 VALUE")
-
-    if value(p_draw, draw_odds) > 0:
-        st.success("MSX VALUE")
-
-    if value(p_away, away_odds) > 0:
-        st.success("MS2 VALUE")
+    return markets
 
 # ----------------------------
-# LIVE TRADE
+# KUPON ENGINE (EN KRİTİK)
 # ----------------------------
-st.subheader("⚡ Canlı Trade")
+def build_coupon(df):
 
-initial_odds = st.number_input("Giriş Oranı",1.0,10.0,2.0)
-live_odds = st.number_input("Canlı Oran",1.0,10.0,1.6)
+    picks = []
 
-if st.button("Karar"):
+    for _, row in df.iterrows():
 
-    if live_odds < initial_odds:
-        st.success("💰 Kâr → Hedge / Cashout")
+        markets = predict(row["home"], row["away"])
+        odds = row["odds"]
 
-    elif live_odds > initial_odds:
-        st.warning("📉 Risk → çık düşün")
+        for k, prob in markets.items():
 
-    else:
-        st.write("Bekle")
+            if k == "MS1":
+                o = odds["home"]
+            elif k == "MSX":
+                o = odds["draw"]
+            elif k == "MS2":
+                o = odds["away"]
+            elif k == "ÜST 2.5":
+                o = odds["over"]
+            else:
+                o = odds["btts"]
+
+            val = value(prob, o)
+
+            # 🔥 EN KRİTİK FİLTRE
+            if val > 0.15 and prob > 0.60:
+
+                picks.append({
+                    "match": f"{row['home']} vs {row['away']}",
+                    "pick": k,
+                    "prob": prob,
+                    "odds": o,
+                    "value": val
+                })
+
+    # en iyi value sıralama
+    picks = sorted(picks, key=lambda x: x["value"], reverse=True)
+
+    banko = [p for p in picks if p["prob"] > 0.70][:2]
+    orta = [p for p in picks if 0.60 < p["prob"] <= 0.70][:2]
+    risk = [p for p in picks if p["value"] > 0.25][:1]
+
+    return banko, orta, risk
 
 # ----------------------------
-# HEDGE
+# UI
 # ----------------------------
-st.subheader("💰 Hedge")
+st.title("💀 ULTIMATE BETTING AI")
 
-stake = st.number_input("Stake",10,10000,100)
+df = get_data()
 
-if st.button("Hedge Hesapla"):
+if df is None:
+    st.error("API limit dolmuş olabilir")
+else:
 
-    hedge_stake = (stake * initial_odds) / live_odds
-    st.success(f"Hedge: {round(hedge_stake,2)}")
+    if st.button("🚀 GÜNLÜK KUPON ÜRET"):
+
+        banko, orta, risk = build_coupon(df)
+
+        st.subheader("🔥 BANKO (En Güvenli)")
+        for b in banko:
+            st.success(f"{b['match']} → {b['pick']} | %{round(b['prob']*100,1)} | oran {b['odds']} | value {round(b['value'],2)}")
+
+        st.subheader("⚖️ ORTA RİSK")
+        for o in orta:
+            st.info(f"{o['match']} → {o['pick']} | %{round(o['prob']*100,1)} | oran {o['odds']}")
+
+        st.subheader("🎲 HIGH VALUE (Riskli)")
+        for r in risk:
+            st.warning(f"{r['match']} → {r['pick']} | value {round(r['value'],2)}")
+
+        st.subheader("💰 AKILLI KUPON")
+
+        combo = banko[:1] + orta[:1]
+
+        for c in combo:
+            st.write(f"{c['match']} → {c['pick']}")
