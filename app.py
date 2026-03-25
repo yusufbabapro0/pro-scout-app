@@ -1,13 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import GradientBoostingRegressor
+import requests
+from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import LabelEncoder
 from scipy.stats import poisson
 
-st.set_page_config(page_title="PRO SCOUT vNext", layout="wide")
+# ============ CONFIG ============
+st.set_page_config(page_title="PRO SCOUT ELITE v3", layout="wide")
 
-# --- DATA LOADER ---
+ODDS_API_KEY = "YOUR_ODDS_API_KEY"
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+
+# ============ DATA ============
 @st.cache_data
 def load_data(lig):
     df_all = pd.DataFrame()
@@ -20,124 +25,206 @@ def load_data(lig):
             continue
     return df_all
 
-# --- FEATURE ENGINEERING ---
-def create_features(df):
+# ============ FEATURES (xG) ============
+def create_xg(df):
     teams = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique()
-    form = {}
+    xg = {}
 
     for t in teams:
-        last = df[(df['HomeTeam']==t)|(df['AwayTeam']==t)].tail(5)
+        last = df[(df['HomeTeam']==t)|(df['AwayTeam']==t)].tail(10)
 
-        scored = last[last['HomeTeam']==t]['FTHG'].sum() + last[last['AwayTeam']==t]['FTAG'].sum()
-        conceded = last[last['HomeTeam']==t]['FTAG'].sum() + last[last['AwayTeam']==t]['FTHG'].sum()
+        scored = last[last['HomeTeam']==t]['FTHG'].mean()
+        conceded = last[last['HomeTeam']==t]['FTAG'].mean()
 
-        form[t] = {
-            "attack": scored/5,
-            "defense": conceded/5
+        xg[t] = {
+            "attack": scored if not np.isnan(scored) else 1,
+            "defense": conceded if not np.isnan(conceded) else 1
         }
 
-    return form
+    return xg
 
-# --- MODEL ---
+# ============ MODEL ============
 @st.cache_data
-def train_model(df):
+def train(df):
     le = LabelEncoder()
     teams = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique()
     le.fit(teams)
 
-    X = []
-    y_home = []
-    y_away = []
+    X, y1, y2 = [], [], []
 
     for _, r in df.iterrows():
         X.append([
             le.transform([r['HomeTeam']])[0],
             le.transform([r['AwayTeam']])[0]
         ])
-        y_home.append(r['FTHG'])
-        y_away.append(r['FTAG'])
+        y1.append(r['FTHG'])
+        y2.append(r['FTAG'])
 
-    model_home = GradientBoostingRegressor().fit(X, y_home)
-    model_away = GradientBoostingRegressor().fit(X, y_away)
+    m1 = MLPRegressor(hidden_layer_sizes=(64,64), max_iter=500).fit(X, y1)
+    m2 = MLPRegressor(hidden_layer_sizes=(64,64), max_iter=500).fit(X, y2)
 
-    return model_home, model_away, le
+    return m1, m2, le
 
-# --- ENGINE ---
-def predict_match(home, away, model_home, model_away, le, form):
-    h_id = le.transform([home])[0]
-    a_id = le.transform([away])[0]
+# ============ ODDS API ============
+def get_real_odds():
+    url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
+    res = requests.get(url)
 
-    base_home = model_home.predict([[h_id, a_id]])[0]
-    base_away = model_away.predict([[h_id, a_id]])[0]
+    if res.status_code != 200:
+        return []
 
-    # form adjust
-    base_home *= (1 + form[home]['attack'] - form[away]['defense'])
-    base_away *= (1 + form[away]['attack'] - form[home]['defense'])
+    data = res.json()
+    matches = []
 
-    base_home = max(base_home, 0.2)
-    base_away = max(base_away, 0.2)
+    for g in data:
+        try:
+            home = g['home_team']
+            away = g['away_team']
+            odds = g['bookmakers'][0]['markets'][0]['outcomes']
 
-    matrix = np.outer(
-        [poisson.pmf(i, base_home) for i in range(6)],
-        [poisson.pmf(j, base_away) for j in range(6)]
+            matches.append({
+                "home": home,
+                "away": away,
+                "o1": odds[0]['price'],
+                "o2": odds[1]['price'],
+                "ox": odds[2]['price']
+            })
+        except:
+            continue
+
+    return matches
+
+# ============ ENGINE ============
+def predict(home, away, m1, m2, le, xg):
+    try:
+        h = le.transform([home])[0]
+        a = le.transform([away])[0]
+    except:
+        return None
+
+    gh = m1.predict([[h, a]])[0]
+    ga = m2.predict([[h, a]])[0]
+
+    gh *= xg.get(home, {"attack":1})["attack"]
+    ga *= xg.get(away, {"attack":1})["attack"]
+
+    gh, ga = max(0.2, gh), max(0.2, ga)
+
+    mat = np.outer(
+        [poisson.pmf(i, gh) for i in range(6)],
+        [poisson.pmf(j, ga) for j in range(6)]
     )
 
-    home_win = np.sum(np.tril(matrix, -1))*100
-    draw = np.sum(np.diag(matrix))*100
-    away_win = np.sum(np.triu(matrix, 1))*100
+    hw = np.sum(np.tril(mat, -1))*100
+    dr = np.sum(np.diag(mat))*100
+    aw = np.sum(np.triu(mat, 1))*100
 
-    over25 = sum(matrix[i,j] for i in range(6) for j in range(6) if i+j>2.5)*100
-    btts = (1 - poisson.pmf(0, base_home)) * (1 - poisson.pmf(0, base_away)) * 100
+    o25 = sum(mat[i,j] for i in range(6) for j in range(6) if i+j>2.5)*100
+    btts = (1 - poisson.pmf(0, gh))*(1 - poisson.pmf(0, ga))*100
 
-    return home_win, draw, away_win, over25, btts, base_home, base_away
+    return hw, dr, aw, o25, btts, gh, ga
 
-# --- UI ---
-st.title("💎 PRO SCOUT vNext")
+# ============ VALUE ============
+def value(prob, odd):
+    return (prob/100)*odd
+
+# ============ AI COMMENT ============
+def ai_comment(home, away, hw, dr, aw, o25, btts):
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        prompt = f"{home} vs {away}. Ev:{hw} Ber:{dr} Dep:{aw} Üst:{o25} KG:{btts}. Kısa analiz."
+
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}]
+        )
+
+        return res.choices[0].message.content
+    except:
+        return "AI yorum alınamadı."
+
+# ============ VALUE BOT ============
+def find_value_bets(matches, m1, m2, le, xg):
+    picks = []
+
+    for m in matches:
+        pred = predict(m['home'], m['away'], m1, m2, le, xg)
+        if not pred:
+            continue
+
+        hw, dr, aw, _, _, _, _ = pred
+
+        v1 = value(hw, m['o1'])
+        vx = value(dr, m['ox'])
+        v2 = value(aw, m['o2'])
+
+        best = max([("MS1", v1), ("X", vx), ("MS2", v2)], key=lambda x: x[1])
+
+        if best[1] > 1.05:
+            picks.append({
+                "match": f"{m['home']} - {m['away']}",
+                "bet": best[0],
+                "value": round(best[1],2)
+            })
+
+    return picks
+
+# ============ COUPON ============
+def build_coupon(picks):
+    picks = sorted(picks, key=lambda x: x['value'], reverse=True)
+    return picks[:4]
+
+# ============ UI ============
+st.title("💎 PRO SCOUT ELITE v3")
 
 LIGLER = {
-    "Türkiye Süper Lig": "T1",
-    "Premier League": "E0",
+    "Türkiye": "T1",
+    "Premier": "E0",
     "La Liga": "SP1"
 }
 
 lig = st.selectbox("Lig seç", list(LIGLER.keys()))
-
 df = load_data(LIGLER[lig])
 
 if df.empty:
-    st.error("Veri çekilemedi")
+    st.error("Veri yok")
 else:
-    model_home, model_away, le = train_model(df)
-    form = create_features(df)
+    m1, m2, le = train(df)
+    xg = create_xg(df)
 
     teams = sorted(pd.concat([df['HomeTeam'], df['AwayTeam']]).unique())
 
-    col1, col2 = st.columns(2)
-    home = col1.selectbox("Ev Sahibi", teams)
-    away = col2.selectbox("Deplasman", teams)
+    st.subheader("📊 Maç Analizi")
+    c1, c2 = st.columns(2)
+    home = c1.selectbox("Ev Sahibi", teams)
+    away = c2.selectbox("Deplasman", teams)
 
-    if st.button("Analiz Et"):
-        hw, dr, aw, o25, btts, gh, ga = predict_match(home, away, model_home, model_away, le, form)
+    if st.button("ANALİZ ET"):
+        res = predict(home, away, m1, m2, le, xg)
 
-        st.subheader(f"{home} vs {away}")
+        if res:
+            hw, dr, aw, o25, btts, gh, ga = res
 
-        st.write(f"🏠 Ev Kazanır: %{hw:.1f}")
-        st.write(f"🤝 Beraberlik: %{dr:.1f}")
-        st.write(f"🚀 Deplasman: %{aw:.1f}")
+            st.write(f"🏠 %{hw:.1f} | 🤝 %{dr:.1f} | 🚀 %{aw:.1f}")
+            st.write(f"🔥 2.5 ÜST: %{o25:.1f} | ⚽ KG: %{btts:.1f}")
+            st.success(f"Skor: {round(gh)}-{round(ga)}")
 
-        st.write("---")
+            st.subheader("🤖 AI Yorum")
+            st.info(ai_comment(home, away, hw, dr, aw, o25, btts))
 
-        st.write(f"🔥 2.5 ÜST: %{o25:.1f}")
-        st.write(f"⚽ KG VAR: %{btts:.1f}")
+    # API Odds
+    st.subheader("📡 Canlı Oran + Value")
+    if st.button("ORANLARI ÇEK"):
+        matches = get_real_odds()
+        picks = find_value_bets(matches, m1, m2, le, xg)
+        coupon = build_coupon(picks)
 
-        st.success(f"Tahmini skor: {round(gh)} - {round(ga)}")
+        st.write("🔥 VALUE MAÇLAR")
+        for p in picks:
+            st.write(p)
 
-        # AI yorum
-        if hw > 65:
-            st.info("💡 Ana bahis: MS1")
-        elif o25 > 65:
-            st.info("💡 Ana bahis: 2.5 ÜST")
-        elif btts > 60:
-            st.info("💡 Ana bahis: KG VAR")
-        else:
-            st.warning("Net bahis yok")
+        st.write("🧾 KUPON")
+        for c in coupon:
+            st.success(c)
