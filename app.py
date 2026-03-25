@@ -1,152 +1,159 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
-import os
-import pickle
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
 
-st.set_page_config(page_title="Learning AI", layout="centered")
-
-API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
-
-headers = {
-    "x-apisports-key": API_KEY
-}
-
-DATA_FILE = "training_data.csv"
-MODEL_FILE = "ml_model.pkl"
+st.set_page_config(page_title="PRO BET AI", layout="centered")
 
 # ----------------------------
-# MAÇLARI ÇEK
+# DATA
 # ----------------------------
-@st.cache_data(ttl=1800)
-def get_matches():
-    url = "https://v3.football.api-sports.io/fixtures?next=20"
-    res = requests.get(url, headers=headers)
-
-    if res.status_code != 200:
-        return None
-
-    data = res.json()["response"]
-
-    matches = []
-
-    for m in data:
-        matches.append({
-            "home": m["teams"]["home"]["name"],
-            "away": m["teams"]["away"]["name"]
+@st.cache_data
+def load_data():
+    try:
+        df = pd.read_csv("matches.csv")
+    except:
+        df = pd.DataFrame({
+            "home_team":[f"T{i}" for i in range(50)],
+            "away_team":[f"A{i}" for i in range(50)],
+            "home_goals":np.random.randint(0,4,50),
+            "away_goals":np.random.randint(0,4,50),
+            "odds_home":np.random.uniform(1.5,3.0,50),
+            "odds_draw":np.random.uniform(2.5,4.0,50),
+            "odds_away":np.random.uniform(2.0,5.0,50)
         })
+    return df
 
-    return pd.DataFrame(matches)
-
-# ----------------------------
-# FEATURE (ÖZELLİK)
-# ----------------------------
-def team_power(team):
-    np.random.seed(abs(hash(team)) % 1000)
-    return np.random.uniform(0.8, 1.8)
-
-def create_features(home, away):
-    return [
-        team_power(home),
-        team_power(away),
-        team_power(home) - team_power(away)
-    ]
+df = load_data()
 
 # ----------------------------
-# MODEL YÜKLE / TRAIN
+# MATCH COLUMN (KRİTİK)
 # ----------------------------
-def load_model():
-
-    if os.path.exists(MODEL_FILE):
-        return pickle.load(open(MODEL_FILE, "rb"))
-
-    else:
-        model = RandomForestClassifier(n_estimators=100)
-        return model
-
-def train_model():
-
-    if not os.path.exists(DATA_FILE):
-        return None
-
-    df = pd.read_csv(DATA_FILE)
-
-    X = df[["f1","f2","f3"]]
-    y = df["result"]
-
-    model = RandomForestClassifier(n_estimators=200)
-    model.fit(X, y)
-
-    pickle.dump(model, open(MODEL_FILE, "wb"))
-
-    return model
-
-model = load_model()
+df["match"] = df["home_team"] + " vs " + df["away_team"]
 
 # ----------------------------
-# TAHMİN
+# ENCODING
 # ----------------------------
-def predict(home, away):
+le = LabelEncoder()
+teams = pd.concat([df["home_team"], df["away_team"]])
+le.fit(teams)
 
-    X = np.array(create_features(home, away)).reshape(1,-1)
+df["home_enc"] = le.transform(df["home_team"])
+df["away_enc"] = le.transform(df["away_team"])
 
-    probs = model.predict_proba(X)[0]
+# ----------------------------
+# FEATURES
+# ----------------------------
+df["goal_diff"] = df["home_goals"] - df["away_goals"]
+df["total_goals"] = df["home_goals"] + df["away_goals"]
 
-    return {
-        "MS1": probs[0],
-        "MSX": probs[1],
-        "MS2": probs[2]
-    }
+df["result"] = df["goal_diff"].apply(lambda x: 1 if x>0 else (0 if x==0 else -1))
+
+features = ["home_enc","away_enc","goal_diff","total_goals"]
+
+# ----------------------------
+# MODEL
+# ----------------------------
+X = df[features]
+y = df["result"]
+
+model = RandomForestClassifier(n_estimators=150)
+model.fit(X,y)
+
+# ----------------------------
+# VALUE FUNCTION
+# ----------------------------
+def value(p,o):
+    return p*o - 1
 
 # ----------------------------
 # UI
 # ----------------------------
-st.title("🧠 Learning Betting AI")
+st.title("💀 PRO BET AI (TEMİZ)")
 
-df = get_matches()
+selected = st.selectbox("Maç Seç", df["match"])
 
-if df is None:
-    st.error("API veri çekemedi")
-else:
+# 🔒 SAFE ROW GET (BUG YOK)
+row_df = df[df["match"] == selected]
 
-    match_names = df.apply(lambda x: f"{x['home']} vs {x['away']}", axis=1)
-    selected = st.selectbox("Maç seç", match_names)
+if row_df.empty:
+    st.error("Maç bulunamadı")
+    st.stop()
 
-    row = df.iloc[match_names.tolist().index(selected)]
+row = row_df.iloc[0]
 
-    if st.button("Tahmin Et"):
-
-        preds = predict(row["home"], row["away"])
-
-        for k,v in preds.items():
-            st.write(f"{k} → %{round(v*100,1)}")
+st.write(f"Seçilen: {row['home_team']} vs {row['away_team']}")
 
 # ----------------------------
-# SONUÇ GİR (ÖĞRENME)
+# ORANLAR
 # ----------------------------
-st.subheader("📊 Sonuç Gir (AI Öğrenir)")
+home_odds = st.number_input("MS1",1.0,10.0,float(row["odds_home"]))
+draw_odds = st.number_input("MSX",1.0,10.0,float(row["odds_draw"]))
+away_odds = st.number_input("MS2",1.0,10.0,float(row["odds_away"]))
 
-result = st.selectbox("Sonuç", ["MS1","MSX","MS2"])
+# ----------------------------
+# TAHMİN
+# ----------------------------
+if st.button("Analiz Et"):
 
-if st.button("Kaydet & Öğret"):
+    sample = pd.DataFrame([[
+        row["home_enc"],
+        row["away_enc"],
+        row["goal_diff"],
+        row["total_goals"]
+    ]], columns=features)
 
-    features = create_features(row["home"], row["away"])
+    probs = model.predict_proba(sample)[0]
 
-    new = pd.DataFrame([{
-        "f1": features[0],
-        "f2": features[1],
-        "f3": features[2],
-        "result": result
-    }])
+    p_home = probs[2]
+    p_draw = probs[1]
+    p_away = probs[0]
 
-    if os.path.exists(DATA_FILE):
-        old = pd.read_csv(DATA_FILE)
-        new = pd.concat([old, new])
+    st.subheader("📊 Olasılık")
 
-    new.to_csv(DATA_FILE, index=False)
+    st.write(f"Ev: %{round(p_home*100,1)}")
+    st.write(f"Beraberlik: %{round(p_draw*100,1)}")
+    st.write(f"Dep: %{round(p_away*100,1)}")
 
-    train_model()
+    st.subheader("💎 Value Bet")
 
-    st.success("AI kendini geliştirdi 🚀")
+    if value(p_home, home_odds) > 0:
+        st.success("MS1 VALUE")
+
+    if value(p_draw, draw_odds) > 0:
+        st.success("MSX VALUE")
+
+    if value(p_away, away_odds) > 0:
+        st.success("MS2 VALUE")
+
+# ----------------------------
+# LIVE TRADE
+# ----------------------------
+st.subheader("⚡ Canlı Trade")
+
+initial_odds = st.number_input("Giriş Oranı",1.0,10.0,2.0)
+live_odds = st.number_input("Canlı Oran",1.0,10.0,1.6)
+
+if st.button("Karar"):
+
+    if live_odds < initial_odds:
+        st.success("💰 Kâr → Hedge / Cashout")
+
+    elif live_odds > initial_odds:
+        st.warning("📉 Risk → çık düşün")
+
+    else:
+        st.write("Bekle")
+
+# ----------------------------
+# HEDGE
+# ----------------------------
+st.subheader("💰 Hedge")
+
+stake = st.number_input("Stake",10,10000,100)
+
+if st.button("Hedge Hesapla"):
+
+    hedge_stake = (stake * initial_odds) / live_odds
+    st.success(f"Hedge: {round(hedge_stake,2)}")
