@@ -1,49 +1,38 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 from scipy.stats import poisson
 from sklearn.ensemble import RandomForestClassifier
 
 # ----------------------------
-# API AYARI
+# TAKIMLAR (SÜPER LİG)
 # ----------------------------
-API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
-headers = {"X-Auth-Token": API_KEY}
+teams = [
+    "Galatasaray","Fenerbahce","Besiktas","Trabzonspor",
+    "Basaksehir","Adana Demirspor","Kasimpasa","Antalyaspor"
+]
 
-# Süper Lig kodu: TR1
-url = "https://api.football-data.org/v4/competitions/TR1/matches?status=FINISHED"
+np.random.seed(42)
 
-@st.cache_data
-def load_data():
-    res = requests.get(url, headers=headers)
-    data = res.json()
+# ----------------------------
+# SAHTE AMA GERÇEKÇİ VERİ
+# ----------------------------
+rows = []
+for _ in range(800):  # daha büyük veri
+    home = np.random.choice(teams)
+    away = np.random.choice([t for t in teams if t != home])
 
-    matches = []
+    home_goals = np.random.poisson(1.6)
+    away_goals = np.random.poisson(1.2)
 
-    for m in data.get("matches", []):
-        if m["score"]["fullTime"]["home"] is not None:
-            matches.append({
-                "home_team": m["homeTeam"]["name"],
-                "away_team": m["awayTeam"]["name"],
-                "home_goals": m["score"]["fullTime"]["home"],
-                "away_goals": m["score"]["fullTime"]["away"]
-            })
+    rows.append([home, away, home_goals, away_goals])
 
-    return pd.DataFrame(matches)
-
-df = load_data()
-
-# Veri boşsa uyarı ver
-if df.empty:
-    st.error("Veri çekilemedi. API limit dolmuş olabilir.")
-    st.stop()
+df = pd.DataFrame(rows, columns=["home_team","away_team","home_goals","away_goals"])
 
 # ----------------------------
 # ELO
 # ----------------------------
-teams = pd.concat([df['home_team'], df['away_team']]).unique()
-elo = {team: 1500 for team in teams}
+elo = {team: 1500 + np.random.randint(-100,100) for team in teams}
 
 # ----------------------------
 # FEATURE ENGINEERING
@@ -67,11 +56,10 @@ df_ml = create_features(df)
 # ----------------------------
 # ML MODEL
 # ----------------------------
-features = ["elo_diff", "total_goals"]
-X = df_ml[features]
+X = df_ml[["elo_diff","total_goals"]]
 y = df_ml["result"]
 
-model = RandomForestClassifier(n_estimators=150)
+model = RandomForestClassifier(n_estimators=200)
 model.fit(X, y)
 
 # ----------------------------
@@ -80,8 +68,6 @@ model.fit(X, y)
 def calculate_strengths(df):
     df = df.copy()
     df["weight"] = np.linspace(0.5, 1.5, len(df))
-
-    teams = pd.concat([df['home_team'], df['away_team']]).unique()
 
     attack = {}
     defense = {}
@@ -115,7 +101,7 @@ def predict(home_team, away_team):
     elo_diff = elo[home_team] - elo[away_team]
 
     ml_input = pd.DataFrame([[elo_diff, home_lambda + away_lambda]],
-                            columns=["elo_diff", "total_goals"])
+                            columns=["elo_diff","total_goals"])
 
     result = model.predict(ml_input)[0]
 
@@ -126,13 +112,13 @@ def predict(home_team, away_team):
             prob = poisson.pmf(i, home_lambda) * poisson.pmf(j, away_lambda)
 
             if result == 1 and i > j:
-                prob *= 1.25
+                prob *= 1.3
             elif result == -1 and i < j:
-                prob *= 1.25
+                prob *= 1.3
             elif result == 0 and i == j:
-                prob *= 1.25
+                prob *= 1.3
 
-            results.append((i, j, prob))
+            results.append((i,j,prob))
 
     results = sorted(results, key=lambda x: x[2], reverse=True)
     return results[:5], result
@@ -140,9 +126,7 @@ def predict(home_team, away_team):
 # ----------------------------
 # UI
 # ----------------------------
-st.title("🇹🇷 Süper Lig Tahmin AI")
-
-teams = sorted(list(set(df['home_team'])))
+st.title("🔥 Süper Lig Tahmin AI (API'siz)")
 
 home_team = st.selectbox("Ev Sahibi", teams)
 away_team = st.selectbox("Deplasman", teams)
@@ -151,8 +135,8 @@ if st.button("Tahmin Et"):
 
     scores, result = predict(home_team, away_team)
 
-    st.subheader("📊 En Olası Skorlar")
-    for h, a, p in scores:
+    st.subheader("📊 Skor Tahminleri")
+    for h,a,p in scores:
         st.write(f"{h}-{a} → %{round(p*100,2)}")
 
     st.subheader("🎯 Maç Sonucu")
