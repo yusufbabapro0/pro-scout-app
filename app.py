@@ -9,10 +9,10 @@ from sklearn.ensemble import RandomForestClassifier
 # API AYARI
 # ----------------------------
 API_KEY = "865a20d4f77b4d92a52002d071ccfa04"
-
 headers = {"X-Auth-Token": API_KEY}
 
-url = "https://api.football-data.org/v4/competitions/PL/matches?status=FINISHED"
+# Süper Lig kodu: TR1
+url = "https://api.football-data.org/v4/competitions/TR1/matches?status=FINISHED"
 
 @st.cache_data
 def load_data():
@@ -21,7 +21,7 @@ def load_data():
 
     matches = []
 
-    for m in data["matches"]:
+    for m in data.get("matches", []):
         if m["score"]["fullTime"]["home"] is not None:
             matches.append({
                 "home_team": m["homeTeam"]["name"],
@@ -33,6 +33,11 @@ def load_data():
     return pd.DataFrame(matches)
 
 df = load_data()
+
+# Veri boşsa uyarı ver
+if df.empty:
+    st.error("Veri çekilemedi. API limit dolmuş olabilir.")
+    st.stop()
 
 # ----------------------------
 # ELO
@@ -66,7 +71,7 @@ features = ["elo_diff", "total_goals"]
 X = df_ml[features]
 y = df_ml["result"]
 
-model = RandomForestClassifier(n_estimators=100)
+model = RandomForestClassifier(n_estimators=150)
 model.fit(X, y)
 
 # ----------------------------
@@ -104,7 +109,7 @@ attack, defense = calculate_strengths(df)
 # ----------------------------
 def predict(home_team, away_team):
 
-    home_lambda = attack[home_team] * defense[away_team] * 1.2
+    home_lambda = attack[home_team] * defense[away_team] * 1.25
     away_lambda = attack[away_team] * defense[home_team]
 
     elo_diff = elo[home_team] - elo[away_team]
@@ -121,11 +126,11 @@ def predict(home_team, away_team):
             prob = poisson.pmf(i, home_lambda) * poisson.pmf(j, away_lambda)
 
             if result == 1 and i > j:
-                prob *= 1.2
+                prob *= 1.25
             elif result == -1 and i < j:
-                prob *= 1.2
+                prob *= 1.25
             elif result == 0 and i == j:
-                prob *= 1.2
+                prob *= 1.25
 
             results.append((i, j, prob))
 
@@ -135,7 +140,7 @@ def predict(home_team, away_team):
 # ----------------------------
 # UI
 # ----------------------------
-st.title("🔥 Gerçek Veri Maç Tahmin AI")
+st.title("🇹🇷 Süper Lig Tahmin AI")
 
 teams = sorted(list(set(df['home_team'])))
 
@@ -146,7 +151,7 @@ if st.button("Tahmin Et"):
 
     scores, result = predict(home_team, away_team)
 
-    st.subheader("📊 Skor Tahminleri")
+    st.subheader("📊 En Olası Skorlar")
     for h, a, p in scores:
         st.write(f"{h}-{a} → %{round(p*100,2)}")
 
