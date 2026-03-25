@@ -1,206 +1,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import LabelEncoder
-from xgboost import XGBRegressor
 from scipy.stats import poisson
-import matplotlib.pyplot as plt
 
-# =========================
-# CONFIG
-# =========================
-st.set_page_config(page_title="PRO-SCOUT ELITE", layout="wide")
+# ----------------------------
+# ÖRNEK VERİ (gömülü)
+# ----------------------------
+data = pd.DataFrame({
+    "home_team": ["Galatasaray", "Fenerbahce", "Besiktas", "Galatasaray", "Trabzonspor"],
+    "away_team": ["Fenerbahce", "Besiktas", "Galatasaray", "Trabzonspor", "Fenerbahce"],
+    "home_goals": [2, 3, 1, 2, 1],
+    "away_goals": [1, 2, 1, 0, 2]
+})
 
-st.markdown("""
-<style>
-body {background-color:#020617;}
-.title {text-align:center;font-size:42px;color:white;font-weight:900;}
-.card {
-    background: linear-gradient(135deg,#1e293b,#020617);
-    padding:20px;border-radius:16px;
-    text-align:center;color:white;
-    box-shadow:0 0 20px rgba(0,0,0,0.5);
-}
-</style>
-""", unsafe_allow_html=True)
+# ----------------------------
+# MODEL
+# ----------------------------
+def calculate_team_strengths(df):
+    teams = pd.concat([df['home_team'], df['away_team']]).unique()
 
-st.markdown("<div class='title'>⚽ PRO-SCOUT ELITE</div>", unsafe_allow_html=True)
+    attack = {}
+    defense = {}
 
-# =========================
-# LEAGUES
-# =========================
-LEAGUES = {
-    'TR Süper Lig': 'T1',
-    'ENG Premier': 'E0',
-    'ESP La Liga': 'SP1',
-    'GER Bundesliga': 'D1',
-    'ITA Serie A': 'I1',
-    'FRA Ligue 1': 'F1'
-}
+    for team in teams:
+        home_games = df[df['home_team'] == team]
+        away_games = df[df['away_team'] == team]
 
-# =========================
-# DATA LOAD
-# =========================
-@st.cache_data
-def load_data(code):
-    df = pd.DataFrame()
+        attack[team] = (
+            home_games['home_goals'].mean() + away_games['away_goals'].mean()
+        ) / 2
 
-    for season in ["2324","2425","2526"]:
-        try:
-            url = f"https://www.football-data.co.uk/mmz4281/{season}/{code}.csv"
-            tmp = pd.read_csv(url)
-            df = pd.concat([df, tmp[['HomeTeam','AwayTeam','FTHG','FTAG']]])
-        except:
-            continue
+        defense[team] = (
+            home_games['away_goals'].mean() + away_games['home_goals'].mean()
+        ) / 2
 
-    df.dropna(inplace=True)
+    return attack, defense
 
-    le = LabelEncoder()
-    teams = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique()
-    le.fit(teams)
 
-    df['h'] = le.transform(df['HomeTeam'])
-    df['a'] = le.transform(df['AwayTeam'])
+def predict_score(home_team, away_team, attack, defense, max_goals=5):
+    home_lambda = attack[home_team] * defense[away_team]
+    away_lambda = attack[away_team] * defense[home_team]
 
-    X = df[['h','a']]
+    results = []
 
-    model_h = XGBRegressor(
-        n_estimators=250,
-        max_depth=5,
-        learning_rate=0.05
-    )
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            prob = poisson.pmf(i, home_lambda) * poisson.pmf(j, away_lambda)
+            results.append((i, j, prob))
 
-    model_a = XGBRegressor(
-        n_estimators=250,
-        max_depth=5,
-        learning_rate=0.05
-    )
+    results = sorted(results, key=lambda x: x[2], reverse=True)
+    return results
 
-    model_h.fit(X, df['FTHG'])
-    model_a.fit(X, df['FTAG'])
 
-    return df, model_h, model_a, le, teams
+# ----------------------------
+# STREAMLIT UI
+# ----------------------------
+st.title("⚽ Maç Skor Tahmin AI")
 
-# =========================
-# TEAM FORM
-# =========================
-def get_team_stats(df, team, is_home=True):
-    if is_home:
-        sub = df[df['HomeTeam']==team].tail(5)
-        att = sub['FTHG'].mean()
-        deff = sub['FTAG'].mean()
-    else:
-        sub = df[df['AwayTeam']==team].tail(5)
-        att = sub['FTAG'].mean()
-        deff = sub['FTHG'].mean()
+attack, defense = calculate_team_strengths(data)
 
-    if np.isnan(att): att = 1.2
-    if np.isnan(deff): deff = 1.2
+teams = sorted(list(set(data['home_team'])))
 
-    return att, deff
+home_team = st.selectbox("Ev Sahibi", teams)
+away_team = st.selectbox("Deplasman", teams)
 
-# =========================
-# PREDICT
-# =========================
-def predict(home, away, df, mh, ma, le):
+if st.button("Tahmin Et"):
+    predictions = predict_score(home_team, away_team, attack, defense)
 
-    h = le.transform([home])[0]
-    a = le.transform([away])[0]
+    st.subheader("📊 En Olası Skorlar")
 
-    h_att, h_def = get_team_stats(df, home, True)
-    a_att, a_def = get_team_stats(df, away, False)
-
-    X_pred = [[h, a]]
-
-    gh = max(mh.predict(X_pred)[0] * (h_att / max(a_def,0.5)), 0.2)
-    ga = max(ma.predict(X_pred)[0] * (a_att / max(h_def,0.5)), 0.2)
-
-    max_goals = 8
-
-    probs = np.outer(
-        [poisson.pmf(i, gh) for i in range(max_goals)],
-        [poisson.pmf(j, ga) for j in range(max_goals)]
-    )
-
-    hw = np.sum(np.tril(probs,-1))*100
-    dr = np.sum(np.diag(probs))*100
-    aw = np.sum(np.triu(probs,1))*100
-
-    # Over 2.5
-    over25 = 100 * (1 - sum(
-        poisson.pmf(i, gh)*poisson.pmf(j, ga)
-        for i in range(3) for j in range(3) if i+j<=2
-    ))
-
-    return gh, ga, hw, dr, aw, over25
-
-# =========================
-# VALUE BET
-# =========================
-def is_value(hw, dr, aw):
-    return max(hw,dr,aw) > 70
-
-# =========================
-# UI
-# =========================
-league = st.selectbox("Lig Seç", list(LEAGUES.keys()))
-data = load_data(LEAGUES[league])
-
-if data:
-    df, mh, ma, le, teams = data
-
-    tab1, tab2, tab3 = st.tabs(["Tahmin","Radar","Banko AI"])
-
-    # TAHMİN
-    with tab1:
-        c1,c2 = st.columns(2)
-        home = c1.selectbox("Ev Sahibi", teams)
-        away = c2.selectbox("Deplasman", teams)
-
-        if st.button("Tahmin Et"):
-
-            gh, ga, hw, dr, aw, over25 = predict(home, away, df, mh, ma, le)
-
-            m1,m2,m3 = st.columns(3)
-            m1.markdown(f"<div class='card'>EV %{hw:.1f}</div>", unsafe_allow_html=True)
-            m2.markdown(f"<div class='card'>BER %{dr:.1f}</div>", unsafe_allow_html=True)
-            m3.markdown(f"<div class='card'>DEP %{aw:.1f}</div>", unsafe_allow_html=True)
-
-            st.success(f"Skor Tahmini: {round(gh)} - {round(ga)}")
-            st.info(f"Over 2.5: %{over25:.1f}")
-
-    # RADAR
-    with tab2:
-        team = st.selectbox("Takım Seç", teams)
-
-        att, deff = get_team_stats(df, team, True)
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111, polar=True)
-
-        vals = [att, deff]
-        angles = np.linspace(0,2*np.pi,len(vals),endpoint=False)
-
-        vals = np.append(vals, vals[0])
-        angles = np.append(angles, angles[0])
-
-        ax.plot(angles, vals)
-        ax.fill(angles, vals, alpha=0.2)
-
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(['Hücum','Savunma'])
-
-        st.pyplot(fig)
-
-    # BANKO
-    with tab3:
-        if st.button("Banko Tara"):
-
-            for i in range(len(teams)-1):
-
-                gh, ga, hw, dr, aw, _ = predict(
-                    teams[i], teams[i+1], df, mh, ma, le
-                )
-
-                if is_value(hw, dr, aw):
-                    st.write(f"🔥 {teams[i]} vs {teams[i+1]} → %{max(hw,aw):.1f}")
+    for home, away, prob in predictions[:5]:
+        st.write(f"{home}-{away} → %{round(prob*100,2)}")
